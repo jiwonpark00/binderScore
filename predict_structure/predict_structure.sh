@@ -70,6 +70,17 @@ log_stage() {
 }
 
 #===============================================================================
+# Helper function: Check if predictions exist in output directory
+#===============================================================================
+
+predictions_exist() {
+    local output_dir="$1"
+    [[ -d "$output_dir" ]] || return 1
+    # Check if find returns any results
+    [ -n "$(find "$output_dir" -type f \( -name "*.pdb" -o -name "*.cif" \) -print -quit)" ]
+}
+
+#===============================================================================
 # Help message
 #===============================================================================
 
@@ -105,6 +116,7 @@ Boltz optional flags:
   --use-potentials             Use inference-time potentials (default: true)
 
 Options:
+  --resume                     Resume from existing outputs (skip completed steps)
   --help, -h                   Show this help message and exit
 
 Example:
@@ -141,6 +153,8 @@ boltz_recycling_steps="3"
 boltz_sampling_steps="200"
 boltz_diffusion_samples="5"
 use_potentials="true"
+# Resume mode
+resume="false"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -164,6 +178,7 @@ while [[ $# -gt 0 ]]; do
         --boltz-sampling-steps)        boltz_sampling_steps="$2"; shift 2 ;;
         --boltz-diffusion-samples)     boltz_diffusion_samples="$2"; shift 2 ;;
         --use-potentials)              use_potentials="$2"; shift 2 ;;
+        --resume)                      resume="true"; shift ;;
         --help|-h)                     show_help; exit 0 ;;
         *)                             log_error "Unknown flag: $1"; show_help; exit 1 ;;
     esac
@@ -354,16 +369,6 @@ parallel_colabfold_batch() {
         return 1
     fi
 
-    # Consolidate outputs
-    for sd in "$output_dir"/gpu_*; do
-        [[ -d "$sd" ]] || continue
-        mv "$sd"/* "$output_dir/" 2>/dev/null || true
-        rmdir "$sd" 2>/dev/null || true
-    done
-
-    # Cleanup temp input directories
-    rm -rf "$input_dir"/in_*/
-
     log_info "[$job_name] Complete. Outputs in $output_dir"
     return 0
 }
@@ -442,8 +447,111 @@ run_chai_predictions() {
 }
 
 #===============================================================================
+# Helper function: Flatten gpu_* directories and cleanup in_* directories
+#===============================================================================
+
+flatten_gpu_dirs() {
+    local output_dir="$1"
+    local input_dir="$2"
+
+    # Consolidate gpu_* outputs into parent
+    for sd in "$output_dir"/gpu_*; do
+        [[ -d "$sd" ]] || continue
+        mv "$sd"/* "$output_dir/" 2>/dev/null || true
+        rmdir "$sd" 2>/dev/null || true
+    done
+
+    # Cleanup temp per-GPU input directories
+    rm -rf "$input_dir"/in_*/
+}
+
+#===============================================================================
+# Helper functions: Determine completed binders per method
+#===============================================================================
+
+# AF2 (multimer & ptm_complex & binder-AF2): done when <name>.done.txt exists
+get_done_binders_af2() {
+    local output_dir="$1"
+    [[ -d "$output_dir" ]] || return 0
+    for f in "$output_dir"/*.done.txt; do
+        [[ -f "$f" ]] || continue
+        basename "$f" .done.txt
+    done
+}
+
+# Chai: done when subdirectory <name>/ exists with at least one .cif or .pdb
+get_done_binders_chai() {
+    local output_dir="$1"
+    [[ -d "$output_dir" ]] || return 0
+    for d in "$output_dir"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name="$(basename "$d")"
+        # Skip log directories
+        [[ "$name" == "chai_log" ]] && continue
+        if [ -n "$(find "$d" -maxdepth 2 -type f \( -name '*.pdb' -o -name '*.cif' \) -print -quit)" ]; then
+            echo "$name"
+        fi
+    done
+}
+
+# Boltz: done when predictions/<name>/ exists under boltz_results_yaml/
+get_done_binders_boltz() {
+    local output_dir="$1"
+    local boltz_pred_dir="$output_dir/boltz_results_yaml/predictions"
+    [[ -d "$boltz_pred_dir" ]] || return 0
+    for d in "$boltz_pred_dir"/*/; do
+        [[ -d "$d" ]] || continue
+        local name
+        name="$(basename "$d")"
+        if [ -n "$(find "$d" -maxdepth 2 -type f \( -name '*.pdb' -o -name '*.cif' \) -print -quit)" ]; then
+            echo "$name"
+        fi
+    done
+}
+
+#===============================================================================
+# Helper function: Prepare a subset input directory for resume
+#===============================================================================
+
+# Creates a temporary subset directory containing only input files for
+# binders that have NOT completed. Copies files (not symlinks) for safety.
+# Args: source_dir, file_extension (.a3m/.fasta/.yaml), done_file (one name per line)
+# Prints: path to the temporary subset directory
+prepare_resume_subset() {
+    local source_dir="$1"
+    local ext="$2"
+    local done_file="$3"
+
+    local subset_dir
+    subset_dir="$(mktemp -d "${source_dir}/resume_subset_XXXX")"
+
+    for f in "$source_dir"/*"$ext"; do
+        [[ -f "$f" ]] || continue
+        local name
+        name="$(basename "$f" "$ext")"
+        # If this binder is NOT in the done list, copy it to subset
+        if ! grep -qxF "$name" "$done_file"; then
+            cp "$f" "$subset_dir/"
+        fi
+    done
+
+    echo "$subset_dir"
+}
+
+#===============================================================================
 # Prepare inputs
 #===============================================================================
+
+# Check if pipeline already complete
+if [[ "$resume" == "true" ]] && [[ -f "$project/.prediction_complete" ]]; then
+    log_info "Pipeline already complete (found .prediction_complete marker)"
+    log_info "Results available at:"
+    log_info "  - Predictions: $project/predictions"
+    log_info "  - Filtered structures: $project/filtered_structures/"
+    log_info "  - Summary: $project/summary.csv"
+    exit 0
+fi
 
 log_stage "Preparing Inputs"
 
@@ -529,139 +637,304 @@ log_stage "Running Structure Predictions"
 set +e
 
 # --- 1. ColabFold AF2-multimer ---
-log_info "Starting AF2-multimer predictions..."
-conda activate colabfold
+run_af2_multimer=true
+af2_multimer_input_dir="$multimer_msa_dir"
 
-if ! parallel_colabfold_batch "af2_multimer" \
-    "$multimer_msa_dir" \
-    "$pred_dir/af2_multimer" \
-    --num-recycle "$num_recycle" \
-    --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
-    --num-seeds "$num_seeds" \
-    --num-models "$num_models" \
-    --random-seed "$cf_random_seed" \
-    --model-type alphafold2_multimer_v3 \
-    --calc-extra-ptm \
-    --rank iptm; then
-    log_error "AF2-multimer predictions failed"
-    pipeline_errors+=("af2_multimer")
+if [[ "$resume" == "true" ]]; then
+    # Always flatten first in case a previous run left gpu_* dirs
+    flatten_gpu_dirs "$pred_dir/af2_multimer" "$multimer_msa_dir"
+
+    done_file=$(mktemp)
+    get_done_binders_af2 "$pred_dir/af2_multimer" > "$done_file"
+    n_done=$(wc -l < "$done_file")
+    n_total=$(find "$multimer_msa_dir" -maxdepth 1 -name '*.a3m' -type f 2>/dev/null | wc -l)
+    n_remaining=$((n_total - n_done))
+
+    if (( n_remaining <= 0 )); then
+        log_info "Skipping AF2-multimer - all $n_total binders complete (--resume)"
+        run_af2_multimer=false
+    elif (( n_done > 0 )); then
+        log_info "Resuming AF2-multimer: $n_remaining of $n_total binders remaining"
+        af2_multimer_input_dir=$(prepare_resume_subset "$multimer_msa_dir" ".a3m" "$done_file")
+    fi
+    rm -f "$done_file"
+fi
+
+if [[ "$run_af2_multimer" == "true" ]]; then
+    log_info "Starting AF2-multimer predictions..."
+    conda activate colabfold
+
+    if ! parallel_colabfold_batch "af2_multimer" \
+        "$af2_multimer_input_dir" \
+        "$pred_dir/af2_multimer" \
+        --num-recycle "$num_recycle" \
+        --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
+        --num-seeds "$num_seeds" \
+        --num-models "$num_models" \
+        --random-seed "$cf_random_seed" \
+        --model-type alphafold2_multimer_v3 \
+        --calc-extra-ptm \
+        --rank iptm; then
+        log_error "AF2-multimer predictions failed"
+        pipeline_errors+=("af2_multimer")
+    fi
+
+    flatten_gpu_dirs "$pred_dir/af2_multimer" "$af2_multimer_input_dir"
+
+    # Cleanup resume subset if one was created
+    [[ "$af2_multimer_input_dir" != "$multimer_msa_dir" ]] && rm -rf "$af2_multimer_input_dir"
+
+    conda deactivate
 fi
 
 # --- 2. ColabFold AF2-ptm on complex ---
-log_info "Starting AF2-ptm complex predictions..."
+run_af2_ptm=true
+af2_ptm_input_dir="$multimer_msa_dir"
 
-if ! parallel_colabfold_batch "af2_ptm_complex" \
-    "$multimer_msa_dir" \
-    "$pred_dir/af2_ptm_complex" \
-    --num-recycle "$num_recycle" \
-    --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
-    --num-seeds "$num_seeds" \
-    --num-models "$num_models" \
-    --random-seed "$cf_random_seed" \
-    --model-type alphafold2_ptm \
-    --calc-extra-ptm \
-    --rank iptm; then
-    log_error "AF2-ptm complex predictions failed"
-    pipeline_errors+=("af2_ptm_complex")
+if [[ "$resume" == "true" ]]; then
+    flatten_gpu_dirs "$pred_dir/af2_ptm_complex" "$multimer_msa_dir"
+
+    done_file=$(mktemp)
+    get_done_binders_af2 "$pred_dir/af2_ptm_complex" > "$done_file"
+    n_done=$(wc -l < "$done_file")
+    n_total=$(find "$multimer_msa_dir" -maxdepth 1 -name '*.a3m' -type f 2>/dev/null | wc -l)
+    n_remaining=$((n_total - n_done))
+
+    if (( n_remaining <= 0 )); then
+        log_info "Skipping AF2-ptm complex - all $n_total binders complete (--resume)"
+        run_af2_ptm=false
+    elif (( n_done > 0 )); then
+        log_info "Resuming AF2-ptm complex: $n_remaining of $n_total binders remaining"
+        af2_ptm_input_dir=$(prepare_resume_subset "$multimer_msa_dir" ".a3m" "$done_file")
+    fi
+    rm -f "$done_file"
 fi
 
-conda deactivate
-
-# --- 3. Chai-1 with MSAs ---
-log_info "Starting Chai-1 predictions..."
-conda activate chai
-
-if ! run_chai_predictions \
-    "$chai_fasta_dir" \
-    "$chai_msa_dir" \
-    "$pred_dir/chai" \
-    "$chai_diffusion_samples" \
-    "$chai_num_trunk_recycles" \
-    "$chai_num_diffn_timesteps"; then
-    log_error "Chai-1 predictions failed"
-    pipeline_errors+=("chai")
-fi
-
-conda deactivate
-
-# --- 4. Boltz-2 with per-chain MSAs ---
-log_info "Starting Boltz-2 predictions..."
-conda activate boltz
-
-if ! boltz predict "$boltz_yaml_dir" \
-    --out_dir "$pred_dir/boltz" \
-    --output_format pdb \
-    --recycling_steps "$boltz_recycling_steps" \
-    --sampling_steps "$boltz_sampling_steps" \
-    --diffusion_samples "$boltz_diffusion_samples" \
-    --num_workers "$WORKERS_PER_GPU" \
-    --devices "$NGPUS" \
-    $use_potentials_flag \
-    --override 2>"$pred_dir/boltz/boltz_stderr.log"; then
-    log_error "Boltz-2 predictions failed (see $pred_dir/boltz/boltz_stderr.log)"
-    pipeline_errors+=("boltz")
-fi
-
-conda deactivate
-
-# --- 5. Binder-only predictions ---
-log_info "Starting binder-only predictions..."
-
-if [[ "$binder_msa_mode" == "true" ]]; then
-    # AF2-ptm on binder-only MSAs
+if [[ "$run_af2_ptm" == "true" ]]; then
+    log_info "Starting AF2-ptm complex predictions..."
     conda activate colabfold
 
-    if ! parallel_colabfold_batch "binder" \
-        "$binder_msa_dir" \
-        "$pred_dir/binder" \
+    if ! parallel_colabfold_batch "af2_ptm_complex" \
+        "$af2_ptm_input_dir" \
+        "$pred_dir/af2_ptm_complex" \
         --num-recycle "$num_recycle" \
         --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
         --num-seeds "$num_seeds" \
         --num-models "$num_models" \
         --random-seed "$cf_random_seed" \
         --model-type alphafold2_ptm \
-        --rank ptm; then
-        log_error "Binder-only (AF2-ptm) predictions failed"
-        pipeline_errors+=("binder")
+        --calc-extra-ptm \
+        --rank iptm; then
+        log_error "AF2-ptm complex predictions failed"
+        pipeline_errors+=("af2_ptm_complex")
     fi
 
+    flatten_gpu_dirs "$pred_dir/af2_ptm_complex" "$af2_ptm_input_dir"
+
+    [[ "$af2_ptm_input_dir" != "$multimer_msa_dir" ]] && rm -rf "$af2_ptm_input_dir"
+
     conda deactivate
-else
-    # Chai-1 without MSAs for binder-only
+fi
+
+# --- 3. Chai-1 with MSAs ---
+run_chai=true
+chai_input_dir="$chai_fasta_dir"
+
+if [[ "$resume" == "true" ]]; then
+    done_file=$(mktemp)
+    get_done_binders_chai "$pred_dir/chai" > "$done_file"
+    n_done=$(wc -l < "$done_file")
+    n_total=$(find "$chai_fasta_dir" -maxdepth 1 -name '*.fasta' -type f 2>/dev/null | wc -l)
+    n_remaining=$((n_total - n_done))
+
+    if (( n_remaining <= 0 )); then
+        log_info "Skipping Chai-1 - all $n_total binders complete (--resume)"
+        run_chai=false
+    elif (( n_done > 0 )); then
+        log_info "Resuming Chai-1: $n_remaining of $n_total binders remaining"
+        chai_input_dir=$(prepare_resume_subset "$chai_fasta_dir" ".fasta" "$done_file")
+    fi
+    rm -f "$done_file"
+fi
+
+if [[ "$run_chai" == "true" ]]; then
+    log_info "Starting Chai-1 predictions..."
     conda activate chai
 
     if ! run_chai_predictions \
-        "$binder_fasta_dir" \
-        "" \
-        "$pred_dir/binder" \
+        "$chai_input_dir" \
+        "$chai_msa_dir" \
+        "$pred_dir/chai" \
         "$chai_diffusion_samples" \
         "$chai_num_trunk_recycles" \
         "$chai_num_diffn_timesteps"; then
-        log_error "Binder-only (Chai) predictions failed"
-        pipeline_errors+=("binder")
+        log_error "Chai-1 predictions failed"
+        pipeline_errors+=("chai")
     fi
 
+    [[ "$chai_input_dir" != "$chai_fasta_dir" ]] && rm -rf "$chai_input_dir"
+
     conda deactivate
+fi
+
+# --- 4. Boltz-2 with per-chain MSAs ---
+run_boltz=true
+boltz_input_dir="$boltz_yaml_dir"
+
+if [[ "$resume" == "true" ]]; then
+    done_file=$(mktemp)
+    get_done_binders_boltz "$pred_dir/boltz" > "$done_file"
+    n_done=$(wc -l < "$done_file")
+    n_total=$(find "$boltz_yaml_dir" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l)
+    n_remaining=$((n_total - n_done))
+
+    if (( n_remaining <= 0 )); then
+        log_info "Skipping Boltz-2 - all $n_total binders complete (--resume)"
+        run_boltz=false
+    elif (( n_done > 0 )); then
+        log_info "Resuming Boltz-2: $n_remaining of $n_total binders remaining"
+        boltz_input_dir=$(prepare_resume_subset "$boltz_yaml_dir" ".yaml" "$done_file")
+    fi
+    rm -f "$done_file"
+fi
+
+if [[ "$run_boltz" == "true" ]]; then
+    log_info "Starting Boltz-2 predictions..."
+    conda activate boltz
+
+    if ! boltz predict "$boltz_input_dir" \
+        --out_dir "$pred_dir/boltz" \
+        --output_format pdb \
+        --recycling_steps "$boltz_recycling_steps" \
+        --sampling_steps "$boltz_sampling_steps" \
+        --diffusion_samples "$boltz_diffusion_samples" \
+        --num_workers "$WORKERS_PER_GPU" \
+        --devices "$NGPUS" \
+        $use_potentials_flag \
+        --override 2>"$pred_dir/boltz/boltz_stderr.log"; then
+        log_error "Boltz-2 predictions failed (see $pred_dir/boltz/boltz_stderr.log)"
+        pipeline_errors+=("boltz")
+    fi
+
+    [[ "$boltz_input_dir" != "$boltz_yaml_dir" ]] && rm -rf "$boltz_input_dir"
+
+    conda deactivate
+fi
+
+# --- 5. Binder-only predictions ---
+run_binder=true
+
+if [[ "$binder_msa_mode" == "true" ]]; then
+    # Binder uses AF2-ptm → check .done.txt
+    binder_input_dir="$binder_msa_dir"
+
+    if [[ "$resume" == "true" ]]; then
+        flatten_gpu_dirs "$pred_dir/binder" "$binder_msa_dir"
+
+        done_file=$(mktemp)
+        get_done_binders_af2 "$pred_dir/binder" > "$done_file"
+        n_done=$(wc -l < "$done_file")
+        n_total=$(find "$binder_msa_dir" -maxdepth 1 -name '*.a3m' -type f 2>/dev/null | wc -l)
+        n_remaining=$((n_total - n_done))
+
+        if (( n_remaining <= 0 )); then
+            log_info "Skipping binder-only (AF2-ptm) - all $n_total binders complete (--resume)"
+            run_binder=false
+        elif (( n_done > 0 )); then
+            log_info "Resuming binder-only (AF2-ptm): $n_remaining of $n_total binders remaining"
+            binder_input_dir=$(prepare_resume_subset "$binder_msa_dir" ".a3m" "$done_file")
+        fi
+        rm -f "$done_file"
+    fi
+
+    if [[ "$run_binder" == "true" ]]; then
+        log_info "Starting binder-only (AF2-ptm) predictions..."
+        conda activate colabfold
+
+        if ! parallel_colabfold_batch "binder" \
+            "$binder_input_dir" \
+            "$pred_dir/binder" \
+            --num-recycle "$num_recycle" \
+            --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
+            --num-seeds "$num_seeds" \
+            --num-models "$num_models" \
+            --random-seed "$cf_random_seed" \
+            --model-type alphafold2_ptm \
+            --rank ptm; then
+            log_error "Binder-only (AF2-ptm) predictions failed"
+            pipeline_errors+=("binder")
+        fi
+
+        flatten_gpu_dirs "$pred_dir/binder" "$binder_input_dir"
+
+        [[ "$binder_input_dir" != "$binder_msa_dir" ]] && rm -rf "$binder_input_dir"
+
+        conda deactivate
+    fi
+else
+    # Binder uses Chai → check subdirectories
+    binder_chai_input_dir="$binder_fasta_dir"
+
+    if [[ "$resume" == "true" ]]; then
+        done_file=$(mktemp)
+        get_done_binders_chai "$pred_dir/binder" > "$done_file"
+        n_done=$(wc -l < "$done_file")
+        n_total=$(find "$binder_fasta_dir" -maxdepth 1 -name '*.fasta' -type f 2>/dev/null | wc -l)
+        n_remaining=$((n_total - n_done))
+
+        if (( n_remaining <= 0 )); then
+            log_info "Skipping binder-only (Chai) - all $n_total binders complete (--resume)"
+            run_binder=false
+        elif (( n_done > 0 )); then
+            log_info "Resuming binder-only (Chai): $n_remaining of $n_total binders remaining"
+            binder_chai_input_dir=$(prepare_resume_subset "$binder_fasta_dir" ".fasta" "$done_file")
+        fi
+        rm -f "$done_file"
+    fi
+
+    if [[ "$run_binder" == "true" ]]; then
+        log_info "Starting binder-only (Chai) predictions..."
+        conda activate chai
+
+        if ! run_chai_predictions \
+            "$binder_chai_input_dir" \
+            "" \
+            "$pred_dir/binder" \
+            "$chai_diffusion_samples" \
+            "$chai_num_trunk_recycles" \
+            "$chai_num_diffn_timesteps"; then
+            log_error "Binder-only (Chai) predictions failed"
+            pipeline_errors+=("binder")
+        fi
+
+        [[ "$binder_chai_input_dir" != "$binder_fasta_dir" ]] && rm -rf "$binder_chai_input_dir"
+
+        conda deactivate
+    fi
 fi
 
 #===============================================================================
 # Distance Calculation
 #===============================================================================
 
-log_stage "Calculating Distances"
+if [[ "$resume" == "true" ]] && [[ -f "$project/distances.csv" ]]; then
+    log_info "Skipping distance calculation - distances.csv already exists (--resume mode)"
+else
+    log_stage "Calculating Distances"
 
-conda activate chai  # Using chai env which has biopython
+    conda activate chai  # Using chai env which has biopython
 
-python $SCRIPT_DIR/calculate_distances.py \
-    --predictions_dir "$pred_dir" \
-    --residue_csv "$residue_csv" \
-    --csv "$csv" \
-    --output_csv "$project/distances.csv" \
-    --attempt 1
+    python $SCRIPT_DIR/calculate_distances.py \
+        --predictions_dir "$pred_dir" \
+        --residue_csv "$residue_csv" \
+        --csv "$csv" \
+        --output_csv "$project/distances.csv" \
+        --attempt 1
 
-conda deactivate
+    conda deactivate
 
-log_info "Distance calculations saved to: $project/distances.csv"
+    log_info "Distance calculations saved to: $project/distances.csv"
+fi
 
 #===============================================================================
 # Filter and Select Structures
@@ -671,20 +944,24 @@ log_info "Distance calculations saved to: $project/distances.csv"
 # Initial Filter (Attempt 1)
 #===============================================================================
 
-log_stage "Initial Filtering (Attempt 1)"
+if [[ "$resume" == "true" ]] && [[ -f "$project/summary_attempt1.csv" ]]; then
+    log_info "Skipping initial filtering - summary_attempt1.csv already exists (--resume mode)"
+else
+    log_stage "Initial Filtering (Attempt 1)"
 
-conda activate chai  # Using chai env for Python
+    conda activate chai  # Using chai env for Python
 
-# First pass filtering to identify failures
-python $SCRIPT_DIR/filter_and_select.py \
-    --distances_csv "$project/distances.csv" \
-    --predictions_dir "$pred_dir" \
-    --cutoff "$distance_cutoff" \
-    --output_dir "$project/filtered_structures_attempt1" \
-    --summary_csv "$project/summary_attempt1.csv" \
-    --binder_msa "$binder_msa_mode"
+    # First pass filtering to identify failures
+    python $SCRIPT_DIR/filter_and_select.py \
+        --distances_csv "$project/distances.csv" \
+        --predictions_dir "$pred_dir" \
+        --cutoff "$distance_cutoff" \
+        --output_dir "$project/filtered_structures_attempt1" \
+        --summary_csv "$project/summary_attempt1.csv" \
+        --binder_msa "$binder_msa_mode"
 
-conda deactivate
+    conda deactivate
+fi
 
 #===============================================================================
 # Check for Failures and Prepare Retry
@@ -723,141 +1000,257 @@ if (( n_failures > 0 )); then
     
     # --- Retry AF2-multimer ---
     if [[ -d "$retry_msa_dir" ]] && ls "$retry_msa_dir"/*.a3m 1>/dev/null 2>&1; then
-        log_info "Retrying AF2-multimer predictions..."
-        conda activate colabfold
-        
-        log_info "ColabFold retry random seed: $cf_retry_seed"
-        
-        if ! parallel_colabfold_batch "af2_multimer_retry" \
-            "$retry_msa_dir" \
-            "$pred_dir_retry/af2_multimer" \
-            --num-recycle "$num_recycle" \
-            --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
-            --num-seeds "$num_seeds" \
-            --num-models "$num_models" \
-            --random-seed "$cf_retry_seed" \
-            --model-type alphafold2_multimer_v3 \
-            --calc-extra-ptm \
-            --rank iptm; then
-            log_error "AF2-multimer retry failed"
-            pipeline_errors+=("af2_multimer_retry")
+        run_retry_af2=true
+        retry_af2_input_dir="$retry_msa_dir"
+
+        if [[ "$resume" == "true" ]]; then
+            flatten_gpu_dirs "$pred_dir_retry/af2_multimer" "$retry_msa_dir"
+
+            done_file=$(mktemp)
+            get_done_binders_af2 "$pred_dir_retry/af2_multimer" > "$done_file"
+            n_done=$(wc -l < "$done_file")
+            n_total=$(find "$retry_msa_dir" -maxdepth 1 -name '*.a3m' -type f 2>/dev/null | wc -l)
+            n_remaining=$((n_total - n_done))
+
+            if (( n_remaining <= 0 )); then
+                log_info "Skipping AF2-multimer retry - all $n_total binders complete (--resume)"
+                run_retry_af2=false
+            elif (( n_done > 0 )); then
+                log_info "Resuming AF2-multimer retry: $n_remaining of $n_total binders remaining"
+                retry_af2_input_dir=$(prepare_resume_subset "$retry_msa_dir" ".a3m" "$done_file")
+            fi
+            rm -f "$done_file"
         fi
-        
-        conda deactivate
+
+        if [[ "$run_retry_af2" == "true" ]]; then
+            log_info "Retrying AF2-multimer predictions..."
+            conda activate colabfold
+            
+            log_info "ColabFold retry random seed: $cf_retry_seed"
+            
+            if ! parallel_colabfold_batch "af2_multimer_retry" \
+                "$retry_af2_input_dir" \
+                "$pred_dir_retry/af2_multimer" \
+                --num-recycle "$num_recycle" \
+                --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
+                --num-seeds "$num_seeds" \
+                --num-models "$num_models" \
+                --random-seed "$cf_retry_seed" \
+                --model-type alphafold2_multimer_v3 \
+                --calc-extra-ptm \
+                --rank iptm; then
+                log_error "AF2-multimer retry failed"
+                pipeline_errors+=("af2_multimer_retry")
+            fi
+
+            flatten_gpu_dirs "$pred_dir_retry/af2_multimer" "$retry_af2_input_dir"
+
+            [[ "$retry_af2_input_dir" != "$retry_msa_dir" ]] && rm -rf "$retry_af2_input_dir"
+            
+            conda deactivate
+        fi
     fi
     
     # --- Retry AF2-ptm complex ---
     if [[ -d "$retry_msa_dir" ]] && ls "$retry_msa_dir"/*.a3m 1>/dev/null 2>&1; then
-        log_info "Retrying AF2-ptm complex predictions..."
-        conda activate colabfold
-        
-        if ! parallel_colabfold_batch "af2_ptm_complex_retry" \
-            "$retry_msa_dir" \
-            "$pred_dir_retry/af2_ptm_complex" \
-            --num-recycle "$num_recycle" \
-            --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
-            --num-seeds "$num_seeds" \
-            --num-models "$num_models" \
-            --random-seed "$cf_retry_seed" \
-            --model-type alphafold2_ptm \
-            --calc-extra-ptm \
-            --rank iptm; then
-            log_error "AF2-ptm complex retry failed"
-            pipeline_errors+=("af2_ptm_complex_retry")
+        run_retry_ptm=true
+        retry_ptm_input_dir="$retry_msa_dir"
+
+        if [[ "$resume" == "true" ]]; then
+            flatten_gpu_dirs "$pred_dir_retry/af2_ptm_complex" "$retry_msa_dir"
+
+            done_file=$(mktemp)
+            get_done_binders_af2 "$pred_dir_retry/af2_ptm_complex" > "$done_file"
+            n_done=$(wc -l < "$done_file")
+            n_total=$(find "$retry_msa_dir" -maxdepth 1 -name '*.a3m' -type f 2>/dev/null | wc -l)
+            n_remaining=$((n_total - n_done))
+
+            if (( n_remaining <= 0 )); then
+                log_info "Skipping AF2-ptm complex retry - all $n_total binders complete (--resume)"
+                run_retry_ptm=false
+            elif (( n_done > 0 )); then
+                log_info "Resuming AF2-ptm complex retry: $n_remaining of $n_total binders remaining"
+                retry_ptm_input_dir=$(prepare_resume_subset "$retry_msa_dir" ".a3m" "$done_file")
+            fi
+            rm -f "$done_file"
         fi
-        
-        conda deactivate
+
+        if [[ "$run_retry_ptm" == "true" ]]; then
+            log_info "Retrying AF2-ptm complex predictions..."
+            conda activate colabfold
+            
+            if ! parallel_colabfold_batch "af2_ptm_complex_retry" \
+                "$retry_ptm_input_dir" \
+                "$pred_dir_retry/af2_ptm_complex" \
+                --num-recycle "$num_recycle" \
+                --recycle-early-stop-tolerance "$recycle_early_stop_tol" \
+                --num-seeds "$num_seeds" \
+                --num-models "$num_models" \
+                --random-seed "$cf_retry_seed" \
+                --model-type alphafold2_ptm \
+                --calc-extra-ptm \
+                --rank iptm; then
+                log_error "AF2-ptm complex retry failed"
+                pipeline_errors+=("af2_ptm_complex_retry")
+            fi
+
+            flatten_gpu_dirs "$pred_dir_retry/af2_ptm_complex" "$retry_ptm_input_dir"
+
+            [[ "$retry_ptm_input_dir" != "$retry_msa_dir" ]] && rm -rf "$retry_ptm_input_dir"
+            
+            conda deactivate
+        fi
     fi
     
     # --- Retry Chai-1 ---
     if [[ -d "$retry_chai_fasta_dir" ]] && ls "$retry_chai_fasta_dir"/*.fasta 1>/dev/null 2>&1; then
-        log_info "Retrying Chai-1 predictions..."
-        conda activate chai
-        
-        # Note: Chai MSA directory is reused (hash-based lookup)
-        if ! run_chai_predictions \
-            "$retry_chai_fasta_dir" \
-            "$chai_msa_dir" \
-            "$pred_dir_retry/chai" \
-            "$chai_diffusion_samples" \
-            "$chai_num_trunk_recycles" \
-            "$chai_num_diffn_timesteps"; then
-            log_error "Chai-1 retry failed"
-            pipeline_errors+=("chai_retry")
+        run_retry_chai=true
+        retry_chai_input_dir="$retry_chai_fasta_dir"
+
+        if [[ "$resume" == "true" ]]; then
+            done_file=$(mktemp)
+            get_done_binders_chai "$pred_dir_retry/chai" > "$done_file"
+            n_done=$(wc -l < "$done_file")
+            n_total=$(find "$retry_chai_fasta_dir" -maxdepth 1 -name '*.fasta' -type f 2>/dev/null | wc -l)
+            n_remaining=$((n_total - n_done))
+
+            if (( n_remaining <= 0 )); then
+                log_info "Skipping Chai-1 retry - all $n_total binders complete (--resume)"
+                run_retry_chai=false
+            elif (( n_done > 0 )); then
+                log_info "Resuming Chai-1 retry: $n_remaining of $n_total binders remaining"
+                retry_chai_input_dir=$(prepare_resume_subset "$retry_chai_fasta_dir" ".fasta" "$done_file")
+            fi
+            rm -f "$done_file"
         fi
-        
-        conda deactivate
+
+        if [[ "$run_retry_chai" == "true" ]]; then
+            log_info "Retrying Chai-1 predictions..."
+            conda activate chai
+            
+            # Note: Chai MSA directory is reused (hash-based lookup)
+            if ! run_chai_predictions \
+                "$retry_chai_input_dir" \
+                "$chai_msa_dir" \
+                "$pred_dir_retry/chai" \
+                "$chai_diffusion_samples" \
+                "$chai_num_trunk_recycles" \
+                "$chai_num_diffn_timesteps"; then
+                log_error "Chai-1 retry failed"
+                pipeline_errors+=("chai_retry")
+            fi
+
+            [[ "$retry_chai_input_dir" != "$retry_chai_fasta_dir" ]] && rm -rf "$retry_chai_input_dir"
+            
+            conda deactivate
+        fi
     fi
     
     # --- Retry Boltz-2 ---
     if [[ -d "$retry_boltz_yaml_dir" ]] && ls "$retry_boltz_yaml_dir"/*.yaml 1>/dev/null 2>&1; then
-        log_info "Retrying Boltz-2 predictions..."
-        conda activate boltz
-        
-        if ! boltz predict "$retry_boltz_yaml_dir" \
-            --out_dir "$pred_dir_retry/boltz" \
-            --output_format pdb \
-            --recycling_steps "$boltz_recycling_steps" \
-            --sampling_steps "$boltz_sampling_steps" \
-            --diffusion_samples "$boltz_diffusion_samples" \
-            --num_workers "$WORKERS_PER_GPU" \
-            --devices "$NGPUS" \
-            $use_potentials_flag \
-            --override 2>"$pred_dir_retry/boltz/boltz_stderr.log"; then
-            log_error "Boltz-2 retry failed (see $pred_dir_retry/boltz/boltz_stderr.log)"
-            pipeline_errors+=("boltz_retry")
+        run_retry_boltz=true
+        retry_boltz_input_dir="$retry_boltz_yaml_dir"
+
+        if [[ "$resume" == "true" ]]; then
+            done_file=$(mktemp)
+            get_done_binders_boltz "$pred_dir_retry/boltz" > "$done_file"
+            n_done=$(wc -l < "$done_file")
+            n_total=$(find "$retry_boltz_yaml_dir" -maxdepth 1 -name '*.yaml' -type f 2>/dev/null | wc -l)
+            n_remaining=$((n_total - n_done))
+
+            if (( n_remaining <= 0 )); then
+                log_info "Skipping Boltz-2 retry - all $n_total binders complete (--resume)"
+                run_retry_boltz=false
+            elif (( n_done > 0 )); then
+                log_info "Resuming Boltz-2 retry: $n_remaining of $n_total binders remaining"
+                retry_boltz_input_dir=$(prepare_resume_subset "$retry_boltz_yaml_dir" ".yaml" "$done_file")
+            fi
+            rm -f "$done_file"
         fi
-        
-        conda deactivate
+
+        if [[ "$run_retry_boltz" == "true" ]]; then
+            log_info "Retrying Boltz-2 predictions..."
+            conda activate boltz
+            
+            if ! boltz predict "$retry_boltz_input_dir" \
+                --out_dir "$pred_dir_retry/boltz" \
+                --output_format pdb \
+                --recycling_steps "$boltz_recycling_steps" \
+                --sampling_steps "$boltz_sampling_steps" \
+                --diffusion_samples "$boltz_diffusion_samples" \
+                --num_workers "$WORKERS_PER_GPU" \
+                --devices "$NGPUS" \
+                $use_potentials_flag \
+                --override 2>"$pred_dir_retry/boltz/boltz_stderr.log"; then
+                log_error "Boltz-2 retry failed (see $pred_dir_retry/boltz/boltz_stderr.log)"
+                pipeline_errors+=("boltz_retry")
+            fi
+
+            [[ "$retry_boltz_input_dir" != "$retry_boltz_yaml_dir" ]] && rm -rf "$retry_boltz_input_dir"
+            
+            conda deactivate
+        fi
     fi
     
     #===============================================================================
     # Calculate Distances for Retry (Attempt 2)
     #===============================================================================
     
-    log_stage "Calculating Distances for Retry (Attempt 2)"
-    
-    conda activate chai
-    
-    python $SCRIPT_DIR/calculate_distances.py \
-        --predictions_dir "$pred_dir_retry" \
-        --residue_csv "$residue_csv" \
-        --csv "$csv" \
-        --output_csv "$project/distances_retry.csv" \
-        --attempt 2
-    
-    conda deactivate
-    
-    log_info "Retry distance calculations saved to: $project/distances_retry.csv"
+    if [[ "$resume" == "true" ]] && [[ -f "$project/distances_retry.csv" ]]; then
+        log_info "Skipping retry distance calculation - distances_retry.csv already exists (--resume mode)"
+    else
+        log_stage "Calculating Distances for Retry (Attempt 2)"
+        
+        conda activate chai
+        
+        python $SCRIPT_DIR/calculate_distances.py \
+            --predictions_dir "$pred_dir_retry" \
+            --residue_csv "$residue_csv" \
+            --csv "$csv" \
+            --output_csv "$project/distances_retry.csv" \
+            --attempt 2
+        
+        conda deactivate
+        
+        log_info "Retry distance calculations saved to: $project/distances_retry.csv"
+    fi
     
     #===============================================================================
     # Final Filter (Merge Attempt 1 + Attempt 2)
     #===============================================================================
     
-    log_stage "Final Filtering (Merging Attempts)"
-    
-    conda activate chai
-    
-    # Remove attempt 1 filtered structures (will be replaced by final)
-    rm -rf "$project/filtered_structures_attempt1"
-    
-    python $SCRIPT_DIR/filter_and_select.py \
-        --distances_csv "$project/distances.csv" \
-        --predictions_dir "$pred_dir" \
-        --cutoff "$distance_cutoff" \
-        --output_dir "$project/filtered_structures" \
-        --summary_csv "$project/summary.csv" \
-        --binder_msa "$binder_msa_mode" \
-        --distances_csv_retry "$project/distances_retry.csv" \
-        --predictions_dir_retry "$pred_dir_retry"
-    
-    conda deactivate
+    if [[ "$resume" == "true" ]] && [[ -d "$project/filtered_structures" ]] && [[ -f "$project/summary.csv" ]]; then
+        log_info "Skipping final filtering - filtered_structures and summary.csv already exist (--resume mode)"
+    else
+        log_stage "Final Filtering (Merging Attempts)"
+        
+        conda activate chai
+        
+        # Remove attempt 1 filtered structures (will be replaced by final)
+        rm -rf "$project/filtered_structures_attempt1"
+        
+        python $SCRIPT_DIR/filter_and_select.py \
+            --distances_csv "$project/distances.csv" \
+            --predictions_dir "$pred_dir" \
+            --cutoff "$distance_cutoff" \
+            --output_dir "$project/filtered_structures" \
+            --summary_csv "$project/summary.csv" \
+            --binder_msa "$binder_msa_mode" \
+            --distances_csv_retry "$project/distances_retry.csv" \
+            --predictions_dir_retry "$pred_dir_retry"
+        
+        conda deactivate
+    fi
 
 else
     # No failures - just rename attempt 1 outputs to final
-    log_info "No failures detected. Using attempt 1 results as final."
-    mv "$project/filtered_structures_attempt1" "$project/filtered_structures"
-    mv "$project/summary_attempt1.csv" "$project/summary.csv"
+    if [[ "$resume" == "true" ]] && [[ -d "$project/filtered_structures" ]] && [[ -f "$project/summary.csv" ]]; then
+        log_info "Skipping final filtering - filtered_structures and summary.csv already exist (--resume mode)"
+    else
+        log_info "No failures detected. Using attempt 1 results as final."
+        mv "$project/filtered_structures_attempt1" "$project/filtered_structures"
+        mv "$project/summary_attempt1.csv" "$project/summary.csv"
+    fi
 fi
 
 #===============================================================================
