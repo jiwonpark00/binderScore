@@ -76,7 +76,7 @@ binderScore.sh                      ← Top-level orchestrator
 
 ### Hardware
 
-- **GPU**: One or more NVIDIA GPUs (required for all structure prediction methods). The pipeline auto-detects GPU count and parallelises ColabFold and Chai-1 jobs across them.
+- **GPU**: One or more NVIDIA GPUs (recommend at least 40GB VRAM for efficient pipeline)  (required for all structure prediction methods). The pipeline auto-detects GPU count and parallelises ColabFold and Chai-1 jobs across them.
 - **RAM**: At least 64 GB for standard use. If using `--msa-method mem` (in-memory ColabFold database search), **≥ 800 GB RAM** is required. The pipeline will automatically fall back to `--msa-method server` if insufficient RAM is detected.
 - **Disk**: Structure predictions and relaxed PDBs can be large. Plan for at least 5–10 GB per 100 binders.
 
@@ -107,18 +107,17 @@ The pipeline uses four separate conda environments to isolate incompatible depen
 
 ### Step-by-step installation
 
-**1. Mount storage volume (if applicable):**
-```bash
-lsblk  # identify your volume, e.g. /dev/vdc
-mkdir -p vol && sudo mount /dev/vdc vol
-sudo chmod 777 vol
-```
+**1. Check your  (if applicable):**
+
 
 **2. Create the scripts directory and transfer BinderScore:**
 ```bash
 mkdir -p ~/bin
 # From your local machine:
 rsync -avzP binderScore ubuntu@<YOUR_HOST>:~/bin/
+
+# From this repo:
+git clone https://github.com/jiwonpark00/binderScore ~/bin/
 ```
 
 **3. Make scripts executable and add to PATH:**
