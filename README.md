@@ -1,5 +1,7 @@
 # BinderScore
 
+This is a practice project – most definitely not bug-free and coded with lots of help from Claude. 
+
 A comprehensive, multi-method computational pipeline for screening *de novo* protein binder designs. BinderScore orchestrates MSA generation, structure prediction across four complementary methods (AlphaFold2-Multimer, AlphaFold2-pTM, Chai-1, and Boltz-2), distance-based filtering, confidence metric extraction, Rosetta interface scoring, and cross-method RMSD calculation — all in a single end-to-end workflow.
 
 ---
