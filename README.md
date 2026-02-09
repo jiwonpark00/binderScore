@@ -151,6 +151,7 @@ echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >>
 source ~/.bashrc
 conda create -n colabfold -c nvidia cuda-nvcc=12.4 -y
 conda deactivate
+cd ~
 ```
 
 **6. Install vmtouch (optional but recommended):**
@@ -158,6 +159,7 @@ conda deactivate
 git clone https://github.com/hoytech/vmtouch.git
 cd vmtouch && make
 sudo make install
+cd ~
 ```
 
 **7. Install jq:**
