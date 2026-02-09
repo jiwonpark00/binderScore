@@ -117,7 +117,7 @@ mkdir -p ~/bin
 rsync -avzP binderScore ubuntu@<YOUR_HOST>:~/bin/
 
 # From this repo:
-git clone https://github.com/jiwonpark00/binderScore ~/bin/
+git clone https://github.com/jiwonpark00/binderScore ~/bin/binderScore
 ```
 
 **3. Make scripts executable and add to PATH:**
