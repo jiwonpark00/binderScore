@@ -147,27 +147,31 @@ source ~/.bashrc
 git clone https://github.com/yoshitakamo/localcolabfold.git
 cd localcolabfold
 pixi install && pixi run setup
-
 conda create -n colabfold -c nvidia cuda-nvcc=12.4 -y
-conda activate colabfold
+
 mkdir -p ~/miniforge3/envs/colabfold/etc/conda/activate.d
 mkdir -p ~/miniforge3/envs/colabfold/etc/conda/deactivate.d
 
-echo 'export OLD_PATH="$PATH"' > ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh
-echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >> ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh
+cat > ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh << 'EOF'
+if [ -z "$_COLABFOLD_PATH_SET" ]; then
+    export _COLABFOLD_OLD_PATH="$PATH"
+    export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"
+    export _COLABFOLD_PATH_SET=1
+fi
+EOF
 
-echo 'export PATH="$OLD_PATH"' > ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
-echo 'unset OLD_PATH' >> ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
+cat > ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh << 'EOF'
+if [ -n "$_COLABFOLD_PATH_SET" ]; then
+    export PATH="$_COLABFOLD_OLD_PATH"
+    unset _COLABFOLD_OLD_PATH
+    unset _COLABFOLD_PATH_SET
+fi
+EOF
 
-conda deactivate
 conda activate colabfold
-
-# Verify
 which colabfold_batch
-
 conda deactivate
 cd ~
-
 rm -f ~/*.sh
 ```
 
