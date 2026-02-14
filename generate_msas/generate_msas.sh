@@ -73,7 +73,7 @@ Conditional flags (required only if --binder-msa true):
   --msa-method   MSA generation method: 'server' or 'mem'
                    server = use ColabFold MSA server (no local DB needed)
                    mem    = use local DB loaded into memory via vmtouch
-                            (requires --db and >=800GB RAM; falls back to server if not enough RAM)
+                            (requires --db and >=700GB RAM; falls back to server if not enough RAM)
   --db           ColabFold database directory (required only if --msa-method mem)
 
 Options:
@@ -164,11 +164,11 @@ if [[ "$binder_msa" == "true" ]]; then
         fi
         [[ -d "$db" ]] || { log_error "Database path not found: $db"; exit 1; }
 
-        # Check available RAM (require >=800GB)
+        # Check available RAM (require >=700GB)
         total_ram_kb=$(awk '/^MemTotal:/ {print $2}' /proc/meminfo)
         total_ram_gb=$(( total_ram_kb / 1024 / 1024 ))
-        if (( total_ram_gb < 800 )); then
-            log_warn "System has ${total_ram_gb}GB RAM, but msa-method=mem requires >=800GB"
+        if (( total_ram_gb < 700 )); then
+            log_warn "System has ${total_ram_gb}GB RAM, but msa-method=mem requires >=700GB"
             log_warn "Forcing msa-method=server"
             msa_method="server"
         else
