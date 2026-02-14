@@ -153,7 +153,7 @@ mkdir -p ~/miniforge3/envs/colabfold/etc/conda/activate.d
 mkdir -p ~/miniforge3/envs/colabfold/etc/conda/deactivate.d
 
 cat > ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh << 'EOF'
-if [ -z "$_COLABFOLD_PATH_SET" ]; then
+if [ -z "${_COLABFOLD_PATH_SET:-}" ]; then
     export _COLABFOLD_OLD_PATH="$PATH"
     export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"
     export _COLABFOLD_PATH_SET=1
@@ -161,8 +161,8 @@ fi
 EOF
 
 cat > ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh << 'EOF'
-if [ -n "$_COLABFOLD_PATH_SET" ]; then
-    export PATH="$_COLABFOLD_OLD_PATH"
+if [ -n "${_COLABFOLD_PATH_SET:-}" ]; then
+    export PATH="${_COLABFOLD_OLD_PATH:-$PATH}"
     unset _COLABFOLD_OLD_PATH
     unset _COLABFOLD_PATH_SET
 fi
