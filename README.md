@@ -147,9 +147,18 @@ source ~/.bashrc
 git clone https://github.com/yoshitakamo/localcolabfold.git
 cd localcolabfold
 pixi install && pixi run setup
-echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >> ~/.bashrc
-source ~/.bashrc
 conda create -n colabfold -c nvidia cuda-nvcc=12.4 -y
+
+# Add the PATH export to conda's activate script so it only applies when the env is active
+mkdir -p ~/miniconda3/envs/colabfold/etc/conda/activate.d
+mkdir -p ~/miniconda3/envs/colabfold/etc/conda/deactivate.d
+
+echo 'export OLD_PATH="$PATH"' > ~/miniconda3/envs/colabfold/etc/conda/activate.d/env_vars.sh
+echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >> ~/miniconda3/envs/colabfold/etc/conda/activate.d/env_vars.sh
+
+echo 'export PATH="$OLD_PATH"' > ~/miniconda3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
+echo 'unset OLD_PATH' >> ~/miniconda3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
+
 conda deactivate
 cd ~
 ```
