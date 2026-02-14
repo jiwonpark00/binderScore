@@ -142,6 +142,14 @@ source ~/.bashrc
 
 **5. Install LocalColabFold:**
 ```bash
+curl -fsSL https://pixi.sh/install.sh | sh
+source ~/.bashrc
+git clone https://github.com/yoshitakamo/localcolabfold.git
+cd localcolabfold
+pixi install && pixi run setup
+
+conda create -n colabfold -c nvidia cuda-nvcc=12.4 -y
+conda activate colabfold
 mkdir -p ~/miniforge3/envs/colabfold/etc/conda/activate.d
 mkdir -p ~/miniforge3/envs/colabfold/etc/conda/deactivate.d
 
@@ -156,6 +164,11 @@ conda activate colabfold
 
 # Verify
 which colabfold_batch
+
+conda deactivate
+cd ~
+
+rm -f ~/*.sh
 ```
 
 **6. Install vmtouch (optional but recommended):**
