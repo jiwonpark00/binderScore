@@ -142,25 +142,20 @@ source ~/.bashrc
 
 **5. Install LocalColabFold:**
 ```bash
-curl -fsSL https://pixi.sh/install.sh | sh
-source ~/.bashrc
-git clone https://github.com/yoshitakamo/localcolabfold.git
-cd localcolabfold
-pixi install && pixi run setup
-conda create -n colabfold -c nvidia cuda-nvcc=12.4 -y
+mkdir -p ~/miniforge3/envs/colabfold/etc/conda/activate.d
+mkdir -p ~/miniforge3/envs/colabfold/etc/conda/deactivate.d
 
-# Add the PATH export to conda's activate script so it only applies when the env is active
-mkdir -p ~/miniconda3/envs/colabfold/etc/conda/activate.d
-mkdir -p ~/miniconda3/envs/colabfold/etc/conda/deactivate.d
+echo 'export OLD_PATH="$PATH"' > ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh
+echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >> ~/miniforge3/envs/colabfold/etc/conda/activate.d/env_vars.sh
 
-echo 'export OLD_PATH="$PATH"' > ~/miniconda3/envs/colabfold/etc/conda/activate.d/env_vars.sh
-echo 'export PATH="/home/ubuntu/localcolabfold/.pixi/envs/default/bin:$PATH"' >> ~/miniconda3/envs/colabfold/etc/conda/activate.d/env_vars.sh
-
-echo 'export PATH="$OLD_PATH"' > ~/miniconda3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
-echo 'unset OLD_PATH' >> ~/miniconda3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
+echo 'export PATH="$OLD_PATH"' > ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
+echo 'unset OLD_PATH' >> ~/miniforge3/envs/colabfold/etc/conda/deactivate.d/env_vars.sh
 
 conda deactivate
-cd ~
+conda activate colabfold
+
+# Verify
+which colabfold_batch
 ```
 
 **6. Install vmtouch (optional but recommended):**
