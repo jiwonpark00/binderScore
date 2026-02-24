@@ -55,8 +55,7 @@ Required flags:
   --project                    Output project directory
   --target-dir                 Target directory (must contain targets.fasta and /pdb)
   --binder-msa                 Generate binder MSAs (true/false)
-  --residue-csv                CSV with target_name,residue_number columns
-  --distance-cutoff            Distance cutoff in Angstroms
+  --residue-csv                CSV with target_name,residue_number,distance_cutoff columns
 
 Conditional flags (Stage 1 — required only if --binder-msa true):
   --msa-method                 MSA generation method: 'server' or 'mem'
@@ -91,17 +90,17 @@ Options:
 Examples:
   # Minimal (target-only MSAs, all defaults)
   $0 --csv input.csv --project my_project/ --target-dir targets/ \\
-     --binder-msa false --residue-csv residues.csv --distance-cutoff 20
+     --binder-msa false --residue-csv residues.csv
 
   # Binder MSAs via ColabFold server
   $0 --csv input.csv --project my_project/ --target-dir targets/ \\
      --binder-msa true --msa-method server \\
-     --residue-csv residues.csv --distance-cutoff 20
+     --residue-csv residues.csv
 
   # Binder MSAs via local DB + custom prediction/scoring params
   $0 --csv input.csv --project my_project/ --target-dir targets/ \\
      --binder-msa true --msa-method mem --db /data/colabfold_db \\
-     --residue-csv residues.csv --distance-cutoff 20 \\
+     --residue-csv residues.csv \\
      --num-recycle 3 --boltz-diffusion-samples 10 --pae-threshold 8.0
 EOF
 }
@@ -116,7 +115,6 @@ project=""
 target_dir=""
 binder_msa=""
 residue_csv=""
-distance_cutoff=""
 
 # --- Conditional (Stage 1) ---
 msa_method=""
@@ -153,7 +151,6 @@ while [[ $# -gt 0 ]]; do
         --target-dir)                  target_dir="$2"; shift 2 ;;
         --binder-msa)                  binder_msa="$2"; shift 2 ;;
         --residue-csv)                 residue_csv="$2"; shift 2 ;;
-        --distance-cutoff)             distance_cutoff="$2"; shift 2 ;;
         # Conditional (Stage 1)
         --msa-method)                  msa_method="$2"; shift 2 ;;
         --db)                          db="$2"; shift 2 ;;
@@ -192,7 +189,6 @@ missing=()
 [[ -z "$target_dir" ]]      && missing+=("--target-dir")
 [[ -z "$binder_msa" ]]      && missing+=("--binder-msa")
 [[ -z "$residue_csv" ]]     && missing+=("--residue-csv")
-[[ -z "$distance_cutoff" ]] && missing+=("--distance-cutoff")
 
 if [[ ${#missing[@]} -gt 0 ]]; then
     log_error "Missing required flags: ${missing[*]}"
@@ -247,8 +243,7 @@ if [[ "$binder_msa" == "true" ]]; then
     log_info "  MSA method:             $msa_method"
     [[ -n "$db" ]] && log_info "  Database:               $db"
 fi
-log_info "  Residue CSV:            $residue_csv"
-log_info "  Distance cutoff:        $distance_cutoff Å"
+log_info "  Residue CSV:            $residue_csv (per-target distance cutoffs)"
 log_info "--- ColabFold (AF2) ---"
 log_info "  Num recycle:            $num_recycle"
 log_info "  Recycle early stop tol: $recycle_early_stop_tol"
@@ -306,7 +301,6 @@ bash "$SCRIPT_DIR/binderScore/predict_structure/predict_structure.sh" \
     --project "$project" \
     --target-dir "$target_dir" \
     --residue-csv "$residue_csv" \
-    --distance-cutoff "$distance_cutoff" \
     --binder-msa "$binder_msa" \
     --num-recycle "$num_recycle" \
     --recycle-early-stop-tol "$recycle_early_stop_tol" \

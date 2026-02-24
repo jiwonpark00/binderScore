@@ -33,7 +33,7 @@ PREFIX_MAP = {
     'binder': 'bin'
 }
 PREFIX_ORDER = ['mul', 'mon', 'bol', 'cha']
-PIVOT_COLS = ['status', 'attempt', 'num_passing', 'min_distance']
+PIVOT_COLS = ['status', 'attempt', 'num_passing', 'min_distance', 'distance_cutoff']
 METRICS_FILES = {
     'af2_multimer': 'af2_multimer_metrics.csv',
     'af2_ptm_complex': 'af2_ptm_complex_metrics.csv',
